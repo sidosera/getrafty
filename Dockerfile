@@ -6,15 +6,12 @@ FROM ubuntu:24.04
 ENV TZ=Europe/London \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    LLVM_VERSION=21 \
-    CXX="/usr/bin/clang++-${LLVM_VERSION}" \
-    CC="/usr/bin/clang-${LLVM_VERSION}" 
+    CXX="/usr/bin/clang++-19" \
+    CC="/usr/bin/clang-19" 
 
 
 # Dependency
 ARG DEPS=" \
-    libfuse3-3 \
-    libfuse3-dev \
     ssh \
     make \
     cmake \
@@ -23,14 +20,14 @@ ARG DEPS=" \
     git \
     linux-tools-common \
     linux-tools-generic \
-    clang-${LLVM_VERSION} \
-    clang-format-${LLVM_VERSION} \
-    clang-tidy-${LLVM_VERSION} \
-    libclang-rt-${LLVM_VERSION}-dev \
-    libc++-${LLVM_VERSION}-dev \
-    libc++abi-${LLVM_VERSION}-dev \
-    clangd-${LLVM_VERSION} \
-    lldb-${LLVM_VERSION} \
+    clang-19 \
+    clang-format-19 \
+    clang-tidy-19 \
+    libclang-rt-19-dev \
+    libc++-19-dev \
+    libc++abi-19-dev \
+    clangd-19 \
+    lldb-19 \
     gdb \
     binutils-dev \
     libdwarf-dev \
@@ -61,12 +58,11 @@ RUN apt-get update -q && \
 RUN apt-get update -q && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y tzdata software-properties-common wget rsync && \
     add-apt-repository -y ppa:ubuntu-toolchain-r/test && \
-    add-apt-repository "deb http://archive.ubuntu.com/ubuntu focal main universe restricted multiverse" && \
     add-apt-repository universe && \
     wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor | tee /etc/apt/trusted.gpg.d/llvm-snapshot.gpg > /dev/null && \
-    add-apt-repository -y "deb http://apt.llvm.org/focal/ llvm-toolchain-focal-${LLVM_VERSION} main" && \
+    add-apt-repository -y "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" && \
     wget -qO- https://apt.kitware.com/keys/kitware-archive-latest.asc | gpg --dearmor | tee /etc/apt/trusted.gpg.d/kitware-archive.gpg > /dev/null && \
-    add-apt-repository 'deb https://apt.kitware.com/ubuntu/ focal main' && \
+    add-apt-repository -y 'deb https://apt.kitware.com/ubuntu/ noble main' && \
     apt-get update -q && \
     apt-get install -y $DEPS
 
@@ -78,7 +74,7 @@ RUN sed -i 's/#PermitEmptyPasswords no/PermitEmptyPasswords yes/' /etc/ssh/sshd_
     echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
     echo "PermitUserEnvironment yes" >> /etc/ssh/sshd_config
 
-RUN echo "export PATH=/lib/llvm-${LLVM_VERSION}/bin/:$PATH" >> /home/ubuntu/.bashrc
+RUN echo "export PATH=/lib/llvm-19/bin/:$PATH" >> /home/ubuntu/.bashrc
 
 # Configure SSH
 RUN echo "StrictHostKeyChecking=no" >> /etc/ssh/ssh_config && mkdir /var/run/sshd

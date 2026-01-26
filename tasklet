@@ -267,16 +267,11 @@ cmd_boot() {
         --cap-add SYS_PTRACE \
         --cap-add SYS_ADMIN \
         --privileged \
-        --device /dev/fuse:/dev/fuse \
         -v "${CONTAINER_BIND_DIR}:/home/${CONTAINER_USER}/workspace/" \
         -p "${CONTAINER_SSH_PORT}:22" \
         -p "${CONTAINER_SITE_PORT}:${CONTAINER_SITE_PORT}" \
         -p "${CONTAINER_FILE_PORT}:${CONTAINER_FILE_PORT}" \
         "$CONTAINER_NAME" >/dev/null
-
-    docker exec "$CONTAINER_NAME" /bin/sh -c "mkdir -p /home/${CONTAINER_USER}/.tasklet"
-    docker cp .bashrc "${CONTAINER_NAME}:/home/${CONTAINER_USER}/.tasklet/.bashrc"
-    docker exec "$CONTAINER_NAME" /bin/sh -c "cat /home/${CONTAINER_USER}/.tasklet/.bashrc >> /home/${CONTAINER_USER}/.bashrc"
 
     printf "Connect by running: \`tasklet attach\`.\n"
     printf "File server available at http://localhost:%s/\n" "${CONTAINER_FILE_PORT}"
