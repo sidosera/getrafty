@@ -1,6 +1,6 @@
 #pragma once
 #include <string>
-#include "bytebuf.hpp"
+#include "byte_buffer.hpp"
 #include "conveyor.hpp"
 #include "event_watcher/event_watcher.hpp"
 #include "transport.hpp"
@@ -45,7 +45,7 @@ private:
   Conveyor pipeline_;
   EventWatcher* ew_;
 
-  ByteBuf write_buffer_;
+  ByteBuf wbuf_;
 
   F<void()> on_flush_completed_ = []() {
   };

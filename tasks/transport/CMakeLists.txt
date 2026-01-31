@@ -4,7 +4,6 @@ add_task_library(
   event_watcher
   event_watcher/event_watcher.cpp
   event_watcher/event_watcher.hpp
-  event_watcher/queue.hpp
 )
 
 target_task_link_libraries(
@@ -18,11 +17,18 @@ add_task_library(
   transport
   abstract_transport.cpp
   abstract_transport.hpp
-  bytebuf.hpp
+  byte_buffer.hpp
+  event.hpp
+  conveyor.hpp
+  tcp/tcp_listener.cpp
+  tcp/tcp_listener.hpp
+  tcp/tcp_transport.cpp
+  tcp/tcp_transport.hpp
+  tcp/tcp_dialer.cpp
+  tcp/tcp_dialer.hpp
   listener.hpp
   dialer.hpp
   transport.hpp
-  conveyor.hpp
 )
 
 target_task_link_libraries(

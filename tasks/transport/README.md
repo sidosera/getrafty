@@ -153,7 +153,6 @@ public:
 
     // Copies n raw bytes from src to the end of the buffer.
     // Ensures: returns false on allocation failure.
-    // Note: does not change the cursor offset.
     bool writeBinary(const void* src, std::size_t n) noexcept;
 
 
@@ -352,7 +351,6 @@ public:
         if (dispatchInbound<Event>(ctx, evt)) return; // catch-all
         ctx.fireInbound(evt);
     }
-
 
     void onOutboundEvent(StageContext& ctx, Event& evt) override {
         if (dispatchOutbound<OutboundBytes>(ctx, evt)) return;
@@ -710,6 +708,12 @@ struct IListener {
     // Not thread-safe.
     virtual void onError(F<void(int /*errno*/)>) = 0;
 
+    // Called once after successful bind.
+    //
+    // Provides the bound address (implementation defined, e.g. IP:PORT for TCP).
+    // Not thread-safe.
+    virtual void onStarted(F<void(const std::string& /*address*/)> cb) = 0;
+
 
     // For each accepted connection, constructs a Transport in `Active` state,
     // initializes the pipeline via `ConveyorInit`, and invokes `onAccepted`.
@@ -784,6 +788,9 @@ listener.onFailure([](int err) {
 });
 listener.onError([](int err) {
     // Transient error (ENFILE, ENOMEM), existing connections unaffected.
+});
+listener.onStarted([](const std::string& address) {
+    // Listener bound to address.
 });
 listener.onAccepted([&](std::unique_ptr<ITransport> transport) {
     initServer(transport->pipeline());

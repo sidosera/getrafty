@@ -1,7 +1,9 @@
 #include "abstract_transport.hpp"
 #include <unistd.h>
 #include <bits/util.hpp>
+#include <bits/ttl/logger.hpp>
 #include <cerrno>
+#include "event.hpp"
 
 using namespace getrafty::io;
 
@@ -9,7 +11,7 @@ AbstractEventLoopTransport::AbstractEventLoopTransport(int fd, EventWatcher* ew)
     : fd_(fd),
       self_endpoint_(*bits::getSockOptHostPort(fd)),
       other_endpoint_(*bits::getPeerHostPort(fd)),
-      pipeline_(*this),
+      pipeline_(this),
       ew_(ew) {}
 
 AbstractEventLoopTransport::~AbstractEventLoopTransport() {
@@ -21,19 +23,94 @@ AbstractEventLoopTransport::~AbstractEventLoopTransport() {
 }
 
 void AbstractEventLoopTransport::onReadable() {
-  // TODO
+  TTL_LOG(Debug) << "onReadable() : fd=" << fd_;
+
+  ByteBuf buf{};
+  int n;
+  while ((n = readSome(buf, 4096)) > 0) {
+    TTL_LOG(Debug) << "readSome(*, " << 4096 << ") : OK = " << n;
+  }
+
+  if (!buf.empty()) {
+    TTL_LOG(Debug) << "fireInbound(InboundBytes) : " << buf.size() << " bytes";
+    InboundBytes evt{std::move(buf)};
+    pipeline_.fireInbound(evt);
+  }
+
+  if ((n == EAGAIN) || (n == EWOULDBLOCK)) {
+    TTL_LOG(Debug) << "readSome() : EAGAIN/EWOULDBLOCK";
+    return;
+  }
+
+  if (n == 0) {
+    TTL_LOG(Info) << "Connection closed by peer fd=" << fd_;
+    InboundTransportInactive evt;
+    pipeline_.fireInbound(evt);
+    return;
+  }
+
+  TTL_LOG(Error) << "readSome() : error=" << n;
+  InboundTransportError evt{n};
+  pipeline_.fireInbound(evt);
 }
 
 void AbstractEventLoopTransport::onWritable() {
-  // TODO
+  TTL_LOG(Debug) << "onWritable() fd=" << fd_ << " wbuf_size=" << wbuf_.size();
+
+  for (int i = 0; i < 256 && !wbuf_.empty(); ++i) {
+    // Read from head
+    wbuf_.seek(0);
+
+    int written = writeSome(wbuf_, wbuf_.size());
+
+    if (written > 0) {
+      TTL_LOG(Debug) << "writeSome() : " << written << " bytes";
+      wbuf_ = wbuf_.slice(static_cast<size_t>(written), wbuf_.size() - static_cast<size_t>(written));
+
+      continue;
+    }
+
+    if (written < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        TTL_LOG(Debug) << "writeSome() : EAGAIN/EWOULDBLOCK";
+        return;
+      }
+
+      TTL_LOG(Error) << "writeSome() : errno=" << errno;
+      ew_->unwatch(fd_, WatchFlag::WRONLY);
+      InboundTransportError evt{errno};
+      pipeline_.fireInbound(evt);
+      return;
+    }
+  }
+
+  // Empty
+  TTL_LOG(Debug) << "Write buffer empty, unwatching WRONLY fd=" << fd_;
+  ew_->unwatch(fd_, WatchFlag::WRONLY);
+  on_flush_completed_();
 }
 
 int AbstractEventLoopTransport::write(ByteBuf& buf) {
-  // TODO
+  if (buf.empty()) {
+    return 0;
+  }
+
+  const size_t size = buf.size();
+  TTL_LOG(Debug) << "write() fd=" << fd_ << " bytes=" << size;
+
+  // Append buffer (move semantics)
+  wbuf_.append(std::move(buf));
+
+  // Watch for writable events
+  ew_->watch(fd_, WatchFlag::WRONLY, [this]() { this->onWritable(); });
+
+  return static_cast<int>(size);
 }
 
 void AbstractEventLoopTransport::flush() {
-  // TODO
+  if (!wbuf_.empty()) {
+    ew_->watch(fd_, WatchFlag::WRONLY, [this]() { this->onWritable(); });
+  }
 }
 
 void AbstractEventLoopTransport::onFlushCompleted(F<void()> cb) {
@@ -45,6 +122,8 @@ void AbstractEventLoopTransport::onWritableStateChanged(F<void(bool)> cb) {
 }
 
 void AbstractEventLoopTransport::readableStateChanged(bool readable) {
+  TTL_LOG(Debug) << "readableStateChanged(" << readable << ") fd=" << fd_;
+
   if (readable) {
     ew_->watch(fd_, WatchFlag::RDONLY, [this]() { this->onReadable(); });
   } else {
