@@ -6,84 +6,70 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <array>
 #include <bits/ttl/logger.hpp>
 #include <bits/util.hpp>
+#include <cassert>
 #include <cerrno>
-#include <cstdint>
 #include <exception>
-#include <memory>
+#include <functional>
 #include <optional>
 #include <unordered_map>
 #include <utility>
-#include "panic.hpp"
 
 namespace getrafty::io {
+using detail::WatchEntry;
 
-template <typename T>
-FdMap<T>::FdMap()
-    : block_(std::make_unique<
-             std::unordered_map<int, std::array<T, kBlockSize>>>()) {}
+namespace detail {
 
-template <typename T>
-FdMap<T>::~FdMap() = default;
-
-template <typename T>
-std::pair<T&, bool> FdMap<T>::try_emplace(int fd, T&& value) {
-  auto [block_id, offset] = getBlockAndIndex(fd);
-
-  auto& block = (*block_)[block_id];
-  T& entry    = block[offset];
-
-  const bool inserted = entry.empty();
-  if (inserted) {
-    entry = std::move(value);
-  }
-
-  return {entry, inserted};
+[[nodiscard]] constexpr auto getBlockAndIndex(int fd) -> std::pair<int, int> {
+  constexpr int kBlockSize = FdWatchMap::kBlockSize;
+  return {fd / kBlockSize, fd % kBlockSize};
 }
 
-template <typename T>
-bool FdMap<T>::erase(int fd) {
+FdWatchMap::FdWatchMap() = default;
+
+FdWatchMap::~FdWatchMap() = default;
+
+std::pair<WatchEntry&, bool> FdWatchMap::try_emplace(int fd,
+                                                     WatchEntry&& value) {
   auto [block_id, offset] = getBlockAndIndex(fd);
+  bool inserted           = false;
+  auto [it, _]            = block_.try_emplace(block_id);
 
-  auto it = block_->find(block_id);
-  if (it == block_->end()) {
-    return false;
+  // Check if slot is empty
+  if (it->second[offset].bitmask_ == 0) {
+    inserted           = true;
+    it->second[offset] = std::move(value);
   }
 
-  T& entry = it->second[offset];
-  if (entry.empty()) {
-    return false;
-  }
-
-  entry = T{};
-  return true;
+  return {it->second[offset], inserted};
 }
 
-// Explicit template instantiation
-template class FdMap<Entry>;
+void FdWatchMap::forEach(std::move_only_function<void(int)> fn) const {
+  for (const auto& [block_id, block] : block_) {
+    for (size_t offset = 0; offset < kBlockSize; ++offset) {
+      const auto& entry = block[offset];
+      if (entry.bitmask_ != 0) {
+        fn(static_cast<int>((block_id * kBlockSize) + offset));
+      }
+    }
+  }
+}
+
+}  // namespace detail
 
 namespace {
 static thread_local EventWatcher* curr_ = nullptr;  // NOLINT
 
-struct EventWatcherThreadScopeGuard {
-  explicit EventWatcherThreadScopeGuard(EventWatcher* ew) noexcept
-      : prev_(std::exchange(curr_, ew)) {}
-
-  ~EventWatcherThreadScopeGuard() { curr_ = prev_; }
-
-  EventWatcherThreadScopeGuard(const EventWatcherThreadScopeGuard&) = delete;
-  EventWatcherThreadScopeGuard& operator=(const EventWatcherThreadScopeGuard&) =
-      delete;
-
-private:
-  EventWatcher* prev_;
-};
-
-[[nodiscard]] EventWatcher* currentEventWatcher() noexcept {
+[[nodiscard]] EventWatcher* self() noexcept {
   return curr_;
+}
+
+EventWatcher* self(EventWatcher* ew) noexcept {
+  auto* prev = curr_;
+  curr_      = ew;
+  return prev;
 }
 
 void handleCallback(WatchCallback& task) noexcept {
@@ -96,82 +82,50 @@ void handleCallback(WatchCallback& task) noexcept {
   }
 }
 
-constexpr int kMaxTaskBatch    = 10;
-constexpr int kMaxEpollRetries = 10;
-constexpr size_t kMaxEvents    = 64;
+constexpr int kMaxEpollRetries = 1 << 2; // (4)
+constexpr size_t kMaxEvents    = 1 << 6; // (64)
 
 }  // namespace
 
 namespace detail {
-Semaphore::Semaphore() : fd_(bits::makeEventFd()), counter_(0) {}
+EventFd::EventFd() : eventfd_(bits::makeEventFd()) {}
 
-Semaphore::~Semaphore() {
-  if (fd_ >= 0) {
-    ::close(fd_);
-  }
+EventFd::~EventFd() {
+  ::close(eventfd_);
 }
 
-uint64_t Semaphore::release(uint64_t val) {
-  uint64_t prev = counter_.fetch_add(val, std::memory_order_release);
-  if (prev == 0) {
-    bits::eventFdWrite(fd_);
-  }
-  return prev;
+void EventFd::clear() const {
+  bits::eventFdRead(eventfd_);
 }
 
-uint64_t Semaphore::acquire(uint64_t val) {
-  if (val == 0) {
-    return 0;
-  }
-
-  uint64_t curr = counter_.load(std::memory_order_acquire);
-  while (curr != 0) {
-    uint64_t limit = std::min(curr, val);
-    if (counter_.compare_exchange_weak(curr, curr - limit,
-                                       std::memory_order_acq_rel,
-                                       std::memory_order_acquire)) {
-
-      if (curr == limit) {
-        bits::eventFdRead(fd_);
-        if (counter_.load(std::memory_order_acquire) != 0) {
-          bits::eventFdWrite(fd_);
-        }
-      }
-      return limit;
-    }
-  }
-  return 0;
+void EventFd::signal() const {
+  bits::eventFdWrite(eventfd_);
 }
+
 }  // namespace detail
 
 EventWatcher::EventWatcher(EpollWaitFunc epoll_impl)
     : epoll_fd_(bits::makeEpoll()), epoll_impl_{std::move(epoll_impl)} {
-  doWatch(sem_.fd_, RDONLY, [this]() {
-    TTL_LOG(Trace) << "wakeup(" << sem_.fd_ << ")";
-    uint64_t i = 0;
-    for (; i < kMaxTaskBatch; ++i) {
-      auto task = task_q_.tryPop();
-      if (!task.has_value()) {
-        break;
-      }
+  handleWatch(event_.eventfd_, RDONLY, [this]() {
+    TTL_LOG(Trace) << "wakeup(" << event_.eventfd_ << ")";
+    std::optional<WatchCallback> task;
+    while ((task = task_q_.tryPop()) && task.has_value()) {
       handleCallback(*task);
     }
-    sem_.acquire(i);
+    event_.clear();
   });
 }
 
 EventWatcher::~EventWatcher() {
   unwatchAll();
-  if (::close(epoll_fd_) == -1) {
-    bits::panic("close failed");
-  }
+  ::close(epoll_fd_);
 }
 
-void EventWatcher::handleLookupWatchModeChange(Entry& entry, int fd,
-                                               int op) const {
+void EventWatcher::handleFdWatchModeChange(detail::WatchEntry& entry, int fd,
+                                           int op) const {
   epoll_event event{};
   event.data.fd = fd;
-  event.events  = entry.events;
+  event.events  = entry.bitmask_;
 
   if (::epoll_ctl(epoll_fd_, op, fd, &event) == -1) {
     TTL_LOG(Error) << "epoll_ctl(" << epoll_fd_ << "," << op << "," << fd
@@ -179,25 +133,27 @@ void EventWatcher::handleLookupWatchModeChange(Entry& entry, int fd,
   }
 }
 
-void EventWatcher::doWatch(int fd, WatchFlag flag, WatchCallback callback) {
-  auto [entry, _] = fd_map_.try_emplace(fd, Entry{});
+void EventWatcher::handleWatch(int fd, WatchFlag flag, WatchCallback callback) {
+  auto [entry, _] = fd_map_.try_emplace(fd, {});
 
-  const uint32_t prev_events = entry.events;
-  entry.events |= flag;
-
-  std::optional<WatchCallback>* slot = nullptr;
-  if (flag == RDONLY) {
-    slot = &entry.read_cb;
-  } else {
-    slot = &entry.write_cb;
+  int fd_op = EPOLL_CTL_MOD;
+  if (entry.bitmask_ == 0) {
+    fd_op = EPOLL_CTL_ADD; 
   }
 
-  if (std::exchange(*slot, std::move(callback)) == std::nullopt) {
-    int op = EPOLL_CTL_MOD;
-    if (prev_events == 0) {
-      op = EPOLL_CTL_ADD;
-    }
-    handleLookupWatchModeChange(entry, fd, op);
+  entry.bitmask_ |= flag;
+
+  switch (flag) {
+    case RDONLY:
+      if (std::exchange(/* reader */ entry.cb_[0], std::move(callback)) == std::nullopt) {
+        handleFdWatchModeChange(entry, fd, fd_op);
+      }
+      break;
+    case WRONLY:
+      if (std::exchange(/* writer */ entry.cb_[1], std::move(callback)) == std::nullopt) {
+        handleFdWatchModeChange(entry, fd, fd_op);
+      }
+      break;
   }
 }
 
@@ -211,28 +167,31 @@ void EventWatcher::watch(const int fd, const WatchFlag flag,
   }
 
   runInEventWatcherLoop([this, fd, flag, cb = std::move(callback)]() mutable {
-    doWatch(fd, flag, std::move(cb));
+    handleWatch(fd, flag, std::move(cb));
   });
 }
 
-void EventWatcher::doUnwatch(int fd, WatchFlag flag) {
-  auto [entry, _] = fd_map_.try_emplace(fd, Entry{});
+void EventWatcher::handleUnwatch(int fd, WatchFlag flag) {
+  auto [entry, _] = fd_map_.try_emplace(fd, {});
 
-  std::optional<WatchCallback>* slot = nullptr;
-  if (flag == RDONLY) {
-    slot = &entry.read_cb;
-  } else {
-    slot = &entry.write_cb;
+  entry.bitmask_ &= ~flag;
+
+  int fd_op = EPOLL_CTL_MOD;
+  if (entry.bitmask_ == 0) {
+    fd_op = EPOLL_CTL_DEL;
   }
 
-  entry.events &= ~flag;
-
-  if (std::exchange(*slot, std::nullopt) != std::nullopt) {
-    int op = EPOLL_CTL_MOD;
-    if (entry.events == 0) {
-      op = EPOLL_CTL_DEL;
-    }
-    handleLookupWatchModeChange(entry, fd, op);
+  switch (flag) {
+    case RDONLY:
+      if (std::exchange(/* reader */ entry.cb_[0], std::nullopt) != std::nullopt) {
+        handleFdWatchModeChange(entry, fd, fd_op);
+      }
+      break;
+    case WRONLY:
+      if (std::exchange(/* writer */ entry.cb_[1], std::nullopt) != std::nullopt) {
+        handleFdWatchModeChange(entry, fd, fd_op);
+      }
+      break;
   }
 }
 
@@ -244,18 +203,17 @@ void EventWatcher::unwatch(const int fd, const WatchFlag flag) {
     return;
   }
 
-  runInEventWatcherLoop([this, fd, flag] { doUnwatch(fd, flag); });
+  runInEventWatcherLoop([this, fd, flag] { handleUnwatch(fd, flag); });
 }
 
 void EventWatcher::unwatchAll() {
-  runInEventWatcherLoop([this]() {
-    fd_map_.forEach([this](int fd, Entry& entry) {
+  runInEventWatcherLoop([this]() mutable {
+    fd_map_.forEach([epoll_fd_ = epoll_fd_](int fd) {
       if (::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr) == -1) {
         TTL_LOG(Error) << "epoll_ctl(" << epoll_fd_ << "," << EPOLL_CTL_DEL
                        << "," << fd << ",*) : ERR = " << errno;
       }
-      entry.read_cb.reset();
-      entry.write_cb.reset();
+      // entry->bitmask_ = 0;
     });
   });
 }
@@ -263,60 +221,80 @@ void EventWatcher::unwatchAll() {
 void EventWatcher::loop(int timeout_ms) {
   TTL_LOG(Trace) << "loop(" << timeout_ms << ")";
 
-  const EventWatcherThreadScopeGuard guard(this);
+  // If loop is called from inside another event loop preserve context
+  auto* ew = self(this);
 
   static thread_local std::array<epoll_event, kMaxEvents> events;
 
-  // Add retries for sporadic interrupts
-  int nfds = 0;
+  // Retry in case of interrupts.
+  // Park here until (any of) FD is ready. 
+  int n_ready = -1;
   for (int retry = 0; retry < kMaxEpollRetries; ++retry) {
-    nfds = epoll_impl_(epoll_fd_, events.data(),
-                       static_cast<int>(events.size()), timeout_ms);
-    if (nfds >= 0 || errno != EINTR) {
+    n_ready = epoll_impl_(epoll_fd_, events.data(),
+                          static_cast<int>(events.size()), timeout_ms);
+    if (n_ready >= 0 || errno != EINTR) {
       break;
     }
     TTL_LOG(Trace) << "epoll_impl_(" << epoll_fd_ << ",*," << events.size()
                    << "," << timeout_ms << ") interrupted";
   }
 
-  if (nfds < 0) {
-    bits::panic("epoll_wait failed");
-  }
-
-  TTL_LOG(Trace) << "epoll_impl_(" << epoll_fd_ << ",*," << events.size() << ","
-                 << timeout_ms << ") returned " << nfds << " events";
-
-  for (int i = 0; i < nfds; ++i) {
-    const auto& event = events[i];
-    const int fd      = event.data.fd;
-
-    auto [entry, _] = fd_map_.try_emplace(fd, Entry{});
-
-    if ((event.events & EPOLLIN) != 0 && entry.read_cb.has_value()) {
-      TTL_LOG(Trace) << "readable(" << fd << ")";
-      handleCallback(entry.read_cb.value());
-    }
-
-    if ((event.events & EPOLLOUT) != 0 && entry.write_cb.has_value()) {
-      TTL_LOG(Trace) << "writable(" << fd << ")";
-      handleCallback(entry.write_cb.value());
-    }
-  }
-}
-
-void EventWatcher::runInEventWatcherLoop(WatchCallback task) {
-  if (!task) {
+  if (n_ready < 0) {
+    TTL_LOG(Trace) << "epoll_impl_(" << epoll_fd_ << ",*," << events.size()
+                   << "," << timeout_ms << ") failed with " << n_ready
+                   << " ret";
     return;
   }
 
-  // Inline if called from within the event watcher thread.
-  if (currentEventWatcher() == this) {
+  TTL_LOG(Trace) << "epoll_impl_(" << epoll_fd_ << ",*," << events.size() << ","
+                 << timeout_ms << ") returned " << n_ready << " events";
+
+  for (int i = 0; i < n_ready; ++i) {
+    const auto& event = events[i];
+    const int fd      = event.data.fd;
+
+    auto [entry, _] = fd_map_.try_emplace(fd, {});
+
+
+    // FD is broken, let caller handle
+    if ((event.events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
+      TTL_LOG(Trace) << "error on fd(" << fd << "), events=0x" << std::hex
+                     << event.events << std::dec;
+      if ((entry.bitmask_ & RDONLY) != 0) {
+        handleCallback(/* reader */ *entry.cb_[0]);
+      }
+      if ((entry.bitmask_ & WRONLY) != 0) {
+        handleCallback(/* writer */ *entry.cb_[1]);
+      }
+      continue;
+    }
+
+    if ((event.events & EPOLLIN) != 0 && (entry.bitmask_ & RDONLY) != 0) {
+      TTL_LOG(Trace) << "readable(" << fd << ")";
+      handleCallback(/* reader */ *entry.cb_[0]);
+    }
+
+    if ((event.events & EPOLLOUT) != 0 && (entry.bitmask_ & WRONLY) != 0) {
+      TTL_LOG(Trace) << "writable(" << fd << ")";
+      handleCallback(/* writer */ *entry.cb_[1]);
+    }
+  }
+
+  assert(self(ew) == this);
+}
+
+void EventWatcher::runInEventWatcherLoop(WatchCallback task) {
+  // Shortcut to run inline
+  if (self() == this) {
     handleCallback(task);
     return;
   }
 
-  task_q_.push(std::move(task));
-  sem_.release(1);
+  if (!task_q_.push(std::move(task))) {
+    // TODO: Propagate
+    return;
+  }
+  event_.signal();
 }
 
 }  // namespace getrafty::io

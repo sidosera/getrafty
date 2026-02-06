@@ -40,12 +40,12 @@ target_task_link_libraries(
 )
 
 add_task_test(
-  test
-  test.cpp
+  tcp_test
+  tcp/tcp_test.cpp
 )
 
 target_task_link_libraries(
-  test
+  tcp_test
   PRIVATE
   gtest
   transport

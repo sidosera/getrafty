@@ -28,6 +28,11 @@ add_compile_options(-stdlib=libstdc++)
 add_link_options(-stdlib=libstdc++)
 
 # fuse
-add_link_options(-lfuse3)
+find_library(FUSE3_LIB NAMES fuse3)
+if(FUSE3_LIB)
+    add_link_options(${FUSE3_LIB})
+else()
+    message(STATUS "fuse3 not found; skipping link")
+endif()
 
 message(STATUS "CPP standard: ${CMAKE_CXX_STANDARD}")

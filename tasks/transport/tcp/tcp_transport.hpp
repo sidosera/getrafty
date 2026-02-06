@@ -1,6 +1,5 @@
 #pragma once
 #include <tasks/transport/abstract_transport.hpp>
-#include "tcp/tcp_dialer.hpp"
 
 class TcpTransport : public AbstractEventLoopTransport {
   using EventWatcher = getrafty::io::EventWatcher;

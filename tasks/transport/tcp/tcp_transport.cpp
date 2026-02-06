@@ -1,13 +1,12 @@
 #include "tcp_transport.hpp"
 #include <sys/socket.h>
 #include <unistd.h>
-#include <cerrno>
 #include <algorithm>
+#include <cerrno>
 #include <vector>
 
 TcpTransport::TcpTransport(int fd, EventWatcher* ew)
-    : AbstractEventLoopTransport(fd, ew) {
-}
+    : AbstractEventLoopTransport(fd, ew) {}
 
 int TcpTransport::readSome(ByteBuf& dst, size_t max_bytes) {
   std::vector<uint8_t> buffer(max_bytes);
@@ -33,7 +32,7 @@ int TcpTransport::writeSome(ByteBuf& src, size_t max_bytes) {
   }
 
   size_t to_send = std::min(tail, max_bytes);
-  ssize_t n = ::send(fd_, src.to<uint8_t*>(), to_send, 0);
+  ssize_t n      = ::send(fd_, src.to<uint8_t*>(), to_send, 0);
 
   if (n > 0) {
     src.seek(src.offset() + n);

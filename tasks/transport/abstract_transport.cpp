@@ -1,7 +1,7 @@
 #include "abstract_transport.hpp"
 #include <unistd.h>
-#include <bits/util.hpp>
 #include <bits/ttl/logger.hpp>
+#include <bits/util.hpp>
 #include <cerrno>
 #include "event.hpp"
 
@@ -37,8 +37,13 @@ void AbstractEventLoopTransport::onReadable() {
     pipeline_.fireInbound(evt);
   }
 
-  if ((n == EAGAIN) || (n == EWOULDBLOCK)) {
-    TTL_LOG(Debug) << "readSome() : EAGAIN/EWOULDBLOCK";
+  if (n == EAGAIN) {
+    TTL_LOG(Debug) << "readSome() : EAGAIN";
+    return;
+  }
+
+  if (n == EWOULDBLOCK) {
+    TTL_LOG(Debug) << "readSome() : EWOULDBLOCK";
     return;
   }
 
@@ -65,7 +70,8 @@ void AbstractEventLoopTransport::onWritable() {
 
     if (written > 0) {
       TTL_LOG(Debug) << "writeSome() : " << written << " bytes";
-      wbuf_ = wbuf_.slice(static_cast<size_t>(written), wbuf_.size() - static_cast<size_t>(written));
+      wbuf_ = wbuf_.slice(static_cast<size_t>(written),
+                          wbuf_.size() - static_cast<size_t>(written));
 
       continue;
     }

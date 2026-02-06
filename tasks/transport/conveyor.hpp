@@ -1,7 +1,7 @@
 #pragma once
+
 #include "transport.hpp"
 
-// Forward declare Event
 struct Event;
 
 class Conveyor {
