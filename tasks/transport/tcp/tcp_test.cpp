@@ -21,9 +21,9 @@ using ITransportPtr = std::unique_ptr<ITransport>;
 
 class BaseTransportTest : public ::testing::Test {
 protected:
-  void SetUp() override { 
-    // DEBUG: bits::ttl::Ttl::init("stdout://"); 
-    bits::ttl::Ttl::init("discard://"); 
+  void SetUp() override {
+    // Debug: bits::ttl::Ttl::init("stdout://");
+    bits::ttl::Ttl::init("discard://");
   }
 
   void TearDown() override { bits::ttl::Ttl::shutdown(); }

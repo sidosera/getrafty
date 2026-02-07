@@ -31,8 +31,9 @@ void AbstractEventLoopTransport::onReadable() {
     TTL_LOG(Debug) << "readSome(*, " << 4096 << ") : OK = " << n;
   }
 
-  if (!buf.empty()) {
-    TTL_LOG(Debug) << "fireInbound(InboundBytes) : " << buf.size() << " bytes";
+  if (buf.readableBytes() > 0) {
+    TTL_LOG(Debug) << "fireInbound(InboundBytes) : " << buf.readableBytes()
+                   << " bytes";
     InboundBytes evt{std::move(buf)};
     pipeline_.fireInbound(evt);
   }
@@ -60,19 +61,14 @@ void AbstractEventLoopTransport::onReadable() {
 }
 
 void AbstractEventLoopTransport::onWritable() {
-  TTL_LOG(Debug) << "onWritable() fd=" << fd_ << " wbuf_size=" << wbuf_.size();
+  TTL_LOG(Debug) << "onWritable() fd=" << fd_
+                 << " wbuf_size=" << wbuf_.readableBytes();
 
-  for (int i = 0; i < 256 && !wbuf_.empty(); ++i) {
-    // Read from head
-    wbuf_.seek(0);
-
-    int written = writeSome(wbuf_, wbuf_.size());
+  for (int i = 0; i < 256 && wbuf_.readableBytes() > 0; ++i) {
+    int written = writeSome(wbuf_, wbuf_.readableBytes());
 
     if (written > 0) {
       TTL_LOG(Debug) << "writeSome() : " << written << " bytes";
-      wbuf_ = wbuf_.slice(static_cast<size_t>(written),
-                          wbuf_.size() - static_cast<size_t>(written));
-
       continue;
     }
 
@@ -97,15 +93,15 @@ void AbstractEventLoopTransport::onWritable() {
 }
 
 int AbstractEventLoopTransport::write(ByteBuf& buf) {
-  if (buf.empty()) {
+  if (buf.readableBytes() == 0) {
     return 0;
   }
 
-  const size_t size = buf.size();
+  const size_t size = buf.readableBytes();
   TTL_LOG(Debug) << "write() fd=" << fd_ << " bytes=" << size;
 
   // Append buffer (move semantics)
-  wbuf_.append(std::move(buf));
+  wbuf_.write(std::move(buf), size);
 
   // Watch for writable events
   ew_->watch(fd_, WatchFlag::WRONLY, [this]() { this->onWritable(); });
@@ -114,7 +110,7 @@ int AbstractEventLoopTransport::write(ByteBuf& buf) {
 }
 
 void AbstractEventLoopTransport::flush() {
-  if (!wbuf_.empty()) {
+  if (wbuf_.readableBytes() > 0) {
     ew_->watch(fd_, WatchFlag::WRONLY, [this]() { this->onWritable(); });
   }
 }

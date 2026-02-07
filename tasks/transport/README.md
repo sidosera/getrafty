@@ -19,160 +19,95 @@ This design follows Netty pipeline model with:
 
 ## ByteBuf
 
+ByteBuf is a sequential, zero-copy-oriented stream buffer built on fixed-size segments.
 
+Representation:
+- Storage is a pool of fixed-size segments (blocks); segments are never resized.
+- Buffers do not own segments; they hold a list of views: (segment*, offset, len).
+- Segments are reference-counted by the allocator. When no buffers reference a
+  segment, it is returned to the pool.
+- Reads traverse segment views; segments are never moved between buffers.
+- The initial allocator is a simple proxy for malloc/free. The API allows a
+  future pooled allocator without changing callers.
+
+API contract:
 ```cpp
-/*
- * Allocator concept for ByteBuf storage.
- * The allocator is a concrete type supplied by the application.
- * TByteBuf is parameterized by a global allocator instance.
- */
-struct TByteBufAlloc {
-    // Allocate contiguous memory segment and returns first readable byte.
-    // If memory of size `n` can't be allocated returns nullptr.
-    void* alloc(std::size_t n, std::size_t align);
-
-
-    // Free contiguous memory segment previously allocated with `alloc`.
-    void free(void* p, std::size_t n, std::size_t align);
-};
-
-
-// Global allocator instance used by ByteBuf.
-extern TByteBufAlloc ZeroCopyAlloc;
-  
-/*
- * Scatter/gather view of a buffer (POSIX iovec, see <sys/uio.h>).
- * Used by to<IoVecView>() and from<IoVecView>().
- * Valid until the ByteBuf is mutated or destroyed.
- */
-using IoVecView = std::vector<iovec>;
-
-
-/*
- * ByteBuf follows folly::IOBuf.
- *
- * Representation:
- * - Storage is a pool of fixed-size pages; pages are reused and never resized.
- * - Buffers are chains of page slices (offset/length) hidden from callers.
- * - Each page has a shared control block with refcount and is returned to the
- *   pool when no buffers reference it.
- * - Alloc provides allocation for pages; TByteBuf never calls ::operator new
- *   directly and never reallocates a page.
- * - New pages are allocated via the buffer's allocator; each page records the
- *   allocator that will receive it on release.
- * - append(buf) links pages as-is; pages keep their original allocator.
- *
- * Allocation model:
- * - Operations that need more space add pages to the chain.
- * - The only allocation that can occur is when the page pool is empty.
- *
- * API model:
- * - The public API exposes only logical operations and does not expose pages.
- * - to<IoVecView>() exposes a scatter/gather view; from<IoVecView>() copies into pages.
- * - Buffers grow only at the tail; prepend is not supported.
- *   To prepend, create a new buffer for the header and append the payload.
- * - offset()/seek()/read() provide a cursor for copy-based parsing.
- * - append does not move the cursor; call seek(size()) to position at tail.
- * - reserve(capacity) preallocates pages.
- *
- * Complexity:
- * - append(buf) is O(1) (linking).
- * - to<IoVecView>()/slice are zero-copy; read/from<IoVecView>()/append of raw bytes are O(n).
- *
- * Copy semantics:
- * - Copy shares storage (refcount++) and copies view range (start + size).
- * - The allocator association is preserved.
- *
- * Move semantics:
- * - Move transfers the handle (refcount unchanged).
- *
- */
-
-
-template <TByteBufAlloc& TByteBufAllocImpl>
-class TByteBuf {
+class ByteBuf {
 public:
-    // Creates an empty handle with no storage.
-    // Invariant: size() == 0.
-    TByteBuf() = default;
+    ByteBuf() = default;
+
+    // Returns total readable bytes.
+    std::size_t readableBytes() const noexcept;
+
+    // Returns currently reserved writable bytes (no new allocation).
+    std::size_t writableBytes() const noexcept;
+
+    // Best-effort read:
+    // Transfers up to n bytes from this into dst.
+    // Bytes are removed from this and appended to dst.
+    // Returns number of bytes transferred.
+    std::size_t read(ByteBuf& dst, std::size_t n) noexcept;
+
+    // Best-effort peek:
+    // Copies up to n bytes into dst, no state change.
+    std::size_t peek(void* dst, std::size_t n) const noexcept;
+
+    // Appends raw bytes to the tail; grows the buffer.
+    // Returns false on allocation failure.
+    bool write(const void* src, std::size_t n) noexcept;
+
+    // Transfer n bytes from src.
+    // Transfers up to n bytes (min(n, src.readableBytes())).
+    void write(ByteBuf&& src, std::size_t n) noexcept;
+
+    // Reserve n writable bytes (may allocate new segments).
+    // Returns false on allocation failure.
+    bool reserve(std::size_t n) noexcept;
+
+    // View of available writable bytes (tailroom) for readv.
+    // Does not allocate; caller must reserve() first.
+    // <T> can be iovec or a custom scatter/gather type.
+    // Valid until the buffer is mutated.
+    template<typename T>
+    T tailroom() noexcept;
+
+    // View of available readable bytes (headroom) for writev.
+    // <T> can be iovec or a custom scatter/gather type.
+    // Valid until the buffer is mutated.
+    template<typename T>
+    T headroom() noexcept;
 
 
-    // Returns total readable bytes across the chain.
-    std::size_t size() const noexcept;
+    // Drop up to n readable bytes from the head.
+    // Returns bytes dropped (<= n).
+    std::size_t advance(std::size_t n);
 
-
-    // Returns true when size() is 0.
-    bool empty() const noexcept;
-
-
-    // Returns the current cursor offset from the beginning.
-    // Invariant: 0 <= offset() <= size().
-    std::size_t offset() const noexcept;
-
-
-    // Sets the cursor offset from the beginning.
-    // Requires: offset <= size().
-    void seek(std::size_t offset);
-
-
-    // Copies n raw bytes from the cursor into dst and advances the cursor.
-    // Ensures: returns bytes read or -errno on error.
-    int readBinary(void* dst, std::size_t n) noexcept;
-
-
-    // Reads a portable-encoded integer from the cursor into out.
-    // Ensures: returns false if insufficient data.
-    bool readUI32(std::uint32_t& out) noexcept;
-    bool readI32(std::int32_t& out) noexcept;
-    bool readUI64(std::uint64_t& out) noexcept;
-    bool readI64(std::int64_t& out) noexcept;
-
-
-    // Converts this buffer to a view of type T.
-    // For example iovec[] for zero-copy IO.
-    template <class T>
-    T to() const noexcept;
-
-
-    // Returns a zero-copy view of [offset, offset + len).
-    // Requires: offset + len <= size().
-    // Ensures: returned slice has offset() == 0.
-    TByteBuf<TByteBufAllocImpl> slice(std::size_t offset, std::size_t len) const;
-
-
-    // Replaces this buffer contents from a view of type T.
-    // Ensures: returns false and makes no changes on allocation failure.
-    template <class T>
-    bool from(const T& view) noexcept;
-
-
-    // Preallocates pages to provide at least capacity bytes.
-    // Ensures: returns false and makes no changes on allocation failure.
-    bool reserve(std::size_t capacity) noexcept;
-
-
-    // Copies n raw bytes from src to the end of the buffer.
-    // Ensures: returns false on allocation failure.
-    bool writeBinary(const void* src, std::size_t n) noexcept;
-
-
-    // Writes a portable-encoded integer to the end of the buffer.
-    // Ensures: returns false on allocation failure.
-    bool writeUI32(std::uint32_t val) noexcept;
-    bool writeI32(std::int32_t val) noexcept;
-    bool writeUI64(std::uint64_t val) noexcept;
-    bool writeI64(std::int64_t val) noexcept;
-
-
-    // Appends another buffer to the back (zero-copy).
-    // Ensures: other becomes empty.
-    // Ensures: offset() advances by other.size().
-    void append(TByteBuf<TByteBufAllocImpl>&& other) noexcept;
+    // Make up to n bytes from tailroom readable.
+    // Returns bytes committed (<= n).
+    std::size_t commit(std::size_t n);
 };
+```
 
+Semantics:
+- read does not move segments. It only adjusts references/slices in both buffers.
+- Partial segment transfers create a view slice for the prefix; the remainder
+  stays in the source buffer.
+- write only appends; it never affects readable bytes already present.
+- headroom() is intended for writev; advance() drops bytes after writev.
+- tailroom() + commit() is intended for readv to append newly read bytes.
 
+Example:
+```cpp
+// readv into buffer
+buf.reserve(4096);
+auto w = buf.tailroom<std::vector<iovec>>();
+ssize_t nread = ::readv(fd, w.data(), static_cast<int>(w.size()));
+if (nread > 0) { buf.commit(static_cast<std::size_t>(nread)); }
 
-using ByteBuf = TByteBuf<ZeroCopyAlloc>;
+// writev from buffer
+auto r = buf.headroom<std::vector<iovec>>();
+ssize_t nwritten = ::writev(fd, r.data(), static_cast<int>(r.size()));
+if (nwritten > 0) { buf.advance(static_cast<std::size_t>(nwritten)); }
 ```
 
 
@@ -499,8 +434,9 @@ public:
     //
     // This call is non blocking. 
     //
-    // Returns negative if outbound queue is full or positive := number of bytes written; 
-    // If operation completes successfully returns number of bytes written; buffer `offset` is moved by `number` bytes forward. 
+    // Returns negative if outbound queue is full or positive := number of bytes written.
+    // If operation completes successfully returns number of bytes written; bytes are
+    // removed from the head of `buf` via advance().
     // If operation fails, returns negative value; buffer is left untouched.
     //
     // If operation fails with backpressure event (buffer full) `onWritableStateChanged` is called with `false` flag.
@@ -591,7 +527,7 @@ public:
 
 
 protected:
-    // Appends bytes to dst and increases size().
+    // Appends bytes to dst and increases readableBytes().
     // Implementations may use readv into newly allocated pages.
     // Returns:
     //   >0 bytes read
@@ -600,8 +536,7 @@ protected:
     virtual int readSome(ByteBuf& dst) = 0;
 
 
-    // Writes bytes from src starting at offset(), advancing the cursor by the
-    // number of bytes written.
+    // Writes bytes from src headroom and advances it by number of bytes written.
     // Implementations may use writev/sendmsg with iovec spans.
     // Returns:
     //   >0 bytes written
@@ -812,27 +747,24 @@ struct FramingStage {
 
 
     void onInbound(StageContext& ctx, InboundBytes& e) {
-        current_frame.append(std::move(e.buf));
-        current_frame.seek(0);
-
+        const std::size_t incoming = e.buf.readableBytes();
+        if (incoming > 0) {
+            current_frame.write(std::move(e.buf), incoming);
+        }
 
         for (;;) {
             std::uint32_t len = 0;
-            if (!current_frame.readUI32(len)) {
-                current_frame.seek(0);
+            if (current_frame.peek(&len, sizeof(len)) != sizeof(len)) {
                 break;
             }
 
-
-            if (current_frame.size() - current_frame.offset() < len) {
-                current_frame.seek(0);
+            if (current_frame.readableBytes() < sizeof(len) + len) {
                 break;
             }
 
-
-            ByteBuf frame = current_frame.slice(current_frame.offset(), len);
-            std::size_t next = current_frame.offset() + len;
-            current_frame = current_frame.slice(next, current_frame.size() - next);
+            current_frame.advance(sizeof(len));
+            ByteBuf frame;
+            current_frame.read(frame, len);
             InboundBytes out{std::move(frame)};
             ctx.fireInbound(out);
         }
@@ -842,8 +774,9 @@ struct FramingStage {
     void onOutbound(StageContext& ctx, OutboundBytes& e) {
         ByteBuf frame = std::move(e.buf);
         ByteBuf out;
-        out.writeUI32(static_cast<uint32_t>(frame.size()));
-        out.append(std::move(frame));
+        std::uint32_t len = static_cast<uint32_t>(frame.readableBytes());
+        out.write(&len, sizeof(len));
+        out.write(std::move(frame), frame.readableBytes());
         OutboundBytes outEvt{std::move(out)};
         ctx.fireOutbound(outEvt);
     }
@@ -945,3 +878,18 @@ ConveyorInit initWithIdle = [&ew](Conveyor& p) {
      .addLast<HeartbeatAppStage>();
 };
 ```
+
+
+TODO:
+
+[x] Interfaces
+
+[x] TCP stack
+
+[*] Stupid buffer
+
+[*] Conveyor
+
+[*] Protocol
+
+[*] Zero-copy buffer

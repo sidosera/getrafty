@@ -1,5 +1,6 @@
 #include "tcp_transport.hpp"
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #include <algorithm>
 #include <cerrno>
@@ -14,7 +15,7 @@ int TcpTransport::readSome(ByteBuf& dst, size_t max_bytes) {
   ssize_t n = ::recv(fd_, buffer.data(), max_bytes, 0);
 
   if (n > 0) {
-    dst.writeBinary(buffer.data(), static_cast<size_t>(n));
+    dst.write(buffer.data(), static_cast<size_t>(n));
     return static_cast<int>(n);
   }
 
@@ -26,16 +27,33 @@ int TcpTransport::readSome(ByteBuf& dst, size_t max_bytes) {
 }
 
 int TcpTransport::writeSome(ByteBuf& src, size_t max_bytes) {
-  size_t tail = src.size() - src.offset();
+  size_t tail = src.readableBytes();
   if (tail == 0) {
     return 0;
   }
 
   size_t to_send = std::min(tail, max_bytes);
-  ssize_t n      = ::send(fd_, src.to<uint8_t*>(), to_send, 0);
+  auto iov = src.headroom<std::vector<iovec>>();
+  if (iov.empty()) {
+    return 0;
+  }
+  size_t remaining = to_send;
+  size_t count = 0;
+  for (auto& entry : iov) {
+    if (remaining == 0) {
+      break;
+    }
+    if (entry.iov_len > remaining) {
+      entry.iov_len = remaining;
+    }
+    remaining -= entry.iov_len;
+    ++count;
+  }
+  iov.resize(count);
+  ssize_t n = ::writev(fd_, iov.data(), static_cast<int>(iov.size()));
 
   if (n > 0) {
-    src.seek(src.offset() + n);
+    src.advance(static_cast<size_t>(n));
     return static_cast<int>(n);
   }
 
