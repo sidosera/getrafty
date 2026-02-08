@@ -1,11 +1,10 @@
 #pragma once
 
 #include <variant>
+
 #include "byte_buffer.hpp"
 
-// Plain event structs (no inheritance!)
-
-// Transport lifecycle
+// Lifecycle
 struct InboundTransportActive {};
 
 struct InboundTransportInactive {};
@@ -16,7 +15,7 @@ struct InboundTransportError {
   explicit InboundTransportError(int e) : err(e) {}
 };
 
-// Data flow
+// Data
 struct InboundBytes {
   ByteBuf buf;
 
@@ -29,7 +28,7 @@ struct OutboundBytes {
   explicit OutboundBytes(ByteBuf&& b) : buf(std::move(b)) {}
 };
 
-// Control flow
+// Control
 struct InboundSuspend {};
 
 struct InboundResume {};
@@ -44,16 +43,7 @@ struct OutboundClose {
   explicit OutboundClose(int r = 0) : reason(r) {}
 };
 
-
-using Event = std::variant<
-    InboundTransportActive,
-    InboundTransportInactive,
-    InboundTransportError,
-    InboundBytes,
-    InboundSuspend,
-    InboundResume,
-    OutboundBytes,
-    OutboundClose,
-    OutboundSuspend,
-    OutboundResume
->;
+using Event = std::variant<InboundTransportActive, InboundTransportInactive,
+                           InboundTransportError, InboundBytes, InboundSuspend,
+                           InboundResume, OutboundBytes, OutboundClose,
+                           OutboundSuspend, OutboundResume>;

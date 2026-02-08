@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <functional>
-#include <utility>
 #include <vector>
 
 #include "conveyor.hpp"
@@ -30,134 +29,271 @@ struct TestTransport final : ITransport {
 
   void onShutdownCompleted(F<void(int)> /*unused*/) override {}
 
-  [[nodiscard]] const char* otherEndpoint() const override { return "other"; }
+  [[nodiscard]] const char* otherEndpoint() const override { return "test"; }
 
-  [[nodiscard]] const char* selfEndpoint() const override { return "self"; }
+  [[nodiscard]] const char* selfEndpoint() const override { return "test"; }
 };
 
-template <size_t N = 0>
-struct AnyStage {
-  static constexpr size_t kN = N;
+template <typename T = void>
+struct MockStage {
+  std::function<void(StageContext&)> on_added = [](auto&) {
+  };
+  std::function<void(StageContext&)> on_removed = [](auto&) {
+  };
+  std::function<void(StageContext&)> on_inbound = [](auto&) {
+  };
+  std::function<void(StageContext&)> on_outbound = [](auto&) {
+  };
 
-  explicit AnyStage(
-      std::move_only_function<void(size_t)> on_inbound_injected  = [](auto) {},
-      std::move_only_function<void(size_t)> on_outbound_injected = [](auto) {},
-      std::move_only_function<void(size_t)> on_added_injected    = [](auto) {})
-      : on_inbound_injected_(std::move(on_inbound_injected)),
-        on_outbound_injected_(std::move(on_outbound_injected)),
-        on_added_injected_(std::move(on_added_injected)) {};
+  void onAdded(StageContext& ctx) { on_added(ctx); }
 
-  void onAdded(StageContext& /*unused*/) { on_added_injected_(kN); }
+  void onRemoved(StageContext& ctx) { on_removed(ctx); }
 
   template <typename E>
   void onInbound(StageContext& ctx, E& evt) {
-    on_inbound_injected_(kN);
+    on_inbound(ctx);
     ctx.fireInbound(evt);
   }
 
   template <typename E>
   void onOutbound(StageContext& ctx, E& evt) {
-    on_outbound_injected_(kN);
+    on_outbound(ctx);
     ctx.fireOutbound(evt);
   }
-
-  std::move_only_function<void(size_t)> on_inbound_injected_;
-  std::move_only_function<void(size_t)> on_outbound_injected_;
-  std::move_only_function<void(size_t)> on_added_injected_;
 };
-
-struct NoneStage {};
 
 }  // namespace
 
-TEST(ConveyorTest, InboundSequence) {
-  TestTransport transport;
-  Conveyor pipeline(&transport);
-  transport.pipeline_ptr = &pipeline;
+class ConveyorTest : public ::testing::Test {
+protected:
+  TestTransport transport_;
+  Conveyor pipeline_{&transport_};
 
+  void SetUp() override { transport_.pipeline_ptr = &pipeline_; }
+};
+
+TEST_F(ConveyorTest, InboundFlowsForward) {
   std::vector<size_t> order;
 
-  pipeline.addLast<AnyStage<1>>(
-      /*on_inbound_injected=*/[&](size_t s) { order.push_back(s); });
-  pipeline.addLast<AnyStage<2>>(
-      /*on_inbound_injected=*/[&](size_t s) { order.push_back(s); });
+  auto capture = [&](size_t id) {
+    return MockStage<>{
+        .on_added = [&, id](auto&) { order.push_back(id); },
+    };
+  };
 
-  InboundTransportActive evt{};
-  pipeline.fireInbound(evt);
+  pipeline_.addLast<MockStage<>>(capture(1));
+  pipeline_.addLast<MockStage<>>(capture(2));
+  pipeline_.addLast<MockStage<>>(capture(3));
 
-  ASSERT_EQ(order.size(), 2U);
+  ASSERT_EQ(order.size(), 3U);
   EXPECT_EQ(order[0], 1U);
   EXPECT_EQ(order[1], 2U);
+  EXPECT_EQ(order[2], 3U);
 }
 
-TEST(ConveyorTest, OutboundSequence) {
-  TestTransport transport;
-  Conveyor pipeline(&transport);
-  transport.pipeline_ptr = &pipeline;
-
+TEST_F(ConveyorTest, OutboundFlowsBackward) {
   std::vector<size_t> order;
 
-  pipeline.addLast<AnyStage<1>>(
-      /*on_inbound_injected=*/[](auto) {},
-      /*on_outbound_injected=*/[&](size_t s) { order.push_back(s); });
-  pipeline.addLast<AnyStage<2>>(
-      /*on_inbound_injected=*/[](auto) {},
-      /*on_outbound_injected=*/[&](size_t s) { order.push_back(s); });
+  auto capture = [&](size_t id) {
+    return MockStage<>{
+        .on_outbound = [&, id](auto&) { order.push_back(id); },
+    };
+  };
+
+  pipeline_.addLast<MockStage<>>(capture(1));
+  pipeline_.addLast<MockStage<>>(capture(2));
+  pipeline_.addLast<MockStage<>>(capture(3));
 
   OutboundClose evt{};
-  pipeline.fireOutbound(evt);
+  pipeline_.fireOutbound(evt);
 
-  ASSERT_EQ(order.size(), 2U);
-  EXPECT_EQ(order[0], 2U);
-  EXPECT_EQ(order[1], 1U);
+  ASSERT_EQ(order.size(), 3U);
+  EXPECT_EQ(order[0], 3U);
+  EXPECT_EQ(order[1], 2U);
+  EXPECT_EQ(order[2], 1U);
 }
 
-TEST(ConveyorTest, EmptyStagePassthrough) {
-  TestTransport transport;
-  Conveyor pipeline(&transport);
-  transport.pipeline_ptr = &pipeline;
+TEST_F(ConveyorTest, Forward) {
+  size_t received = 0;
 
-  int counter = 0;
-  pipeline.addLast<NoneStage>();  // passthrough
-  pipeline.addLast<AnyStage<>>(
-      /*on_inbound_injected=*/[&](size_t) { ++counter; });
+  pipeline_.addLast<MockStage<>>();
+  pipeline_.addLast<MockStage<>>(MockStage<>{
+      .on_inbound = [&](auto&) { ++received; },
+  });
 
   InboundBytes e1{{}};
-  pipeline.fireInbound(e1);
-  EXPECT_EQ(counter, 1);
+  pipeline_.fireInbound(e1);
+
+  EXPECT_EQ(received, 1U);
 
   InboundTransportActive e2{};
-  pipeline.fireInbound(e2);
-  EXPECT_EQ(counter, 2);
+  pipeline_.fireInbound(e2);
+
+  EXPECT_EQ(received, 2U);
 }
 
-TEST(ConveyorTest, EmptyPipeline) {
-  TestTransport transport;
-  Conveyor pipeline(&transport);
-  transport.pipeline_ptr = &pipeline;
+TEST_F(ConveyorTest, EmptyPipeline) {
+  InboundTransportActive inbound{};
+  pipeline_.fireInbound(inbound);
 
-  // OK
-  InboundTransportActive in{};
-  pipeline.fireInbound(in);
+  OutboundClose outbound{};
+  pipeline_.fireOutbound(outbound);
 
-  // OK
-  OutboundClose out{};
-  pipeline.fireOutbound(out);
+  SUCCEED();
 }
 
-TEST(ConveyorTest, OnAdded) {
-  TestTransport transport;
-  Conveyor pipeline(&transport);
-  transport.pipeline_ptr = &pipeline;
+TEST_F(ConveyorTest, OnAdded) {
+  std::vector<size_t> indices;
 
-  int count = 0;
-  pipeline.addLast<AnyStage<1>>(/*on_inbound_injected=*/[](auto) {},
-                                /*on_outbound_injected=*/[](auto) {},
-                                /*on_added_injected=*/
-                                [&](auto s) {
-                                  EXPECT_EQ(s, 1);
-                                  ++count;
-                                });
+  pipeline_.addLast<MockStage<>>(MockStage<>{
+      .on_added = [&](auto& ctx) { indices.push_back(ctx.index()); },
+  });
+  pipeline_.addLast<MockStage<>>(MockStage<>{
+      .on_added = [&](auto& ctx) { indices.push_back(ctx.index()); },
+  });
+  pipeline_.addLast<MockStage<>>(MockStage<>{
+      .on_added = [&](auto& ctx) { indices.push_back(ctx.index()); },
+  });
 
-  EXPECT_EQ(count, 1);
+  ASSERT_EQ(indices.size(), 3U);
+  EXPECT_EQ(indices[0], 0U);
+  EXPECT_EQ(indices[1], 1U);
+  EXPECT_EQ(indices[2], 2U);
+}
+
+TEST_F(ConveyorTest, TypedDispatch) {
+  size_t bytes_count   = 0;
+  size_t active_count  = 0;
+  size_t suspend_count = 0;
+
+  struct TypedStage {
+    size_t* bytes;
+    size_t* active;
+    size_t* suspend;
+
+    void onInbound(StageContext& ctx, InboundBytes& evt) {
+      ++(*bytes);
+      ctx.fireInbound(evt);
+    }
+
+    void onInbound(StageContext& ctx, InboundTransportActive& evt) {
+      ++(*active);
+      ctx.fireInbound(evt);
+    }
+
+    void onInbound(StageContext& ctx, InboundSuspend& evt) {
+      ++(*suspend);
+      ctx.fireInbound(evt);
+    }
+  };
+
+  pipeline_.addLast<TypedStage>(&bytes_count, &active_count, &suspend_count);
+
+  InboundBytes bytes{{}};
+  pipeline_.fireInbound(bytes);
+
+  EXPECT_EQ(bytes_count, 1U);
+  EXPECT_EQ(active_count, 0U);
+
+  InboundTransportActive active{};
+  pipeline_.fireInbound(active);
+
+  EXPECT_EQ(bytes_count, 1U);
+  EXPECT_EQ(active_count, 1U);
+
+  InboundSuspend suspend{};
+  pipeline_.fireInbound(suspend);
+
+  EXPECT_EQ(suspend_count, 1U);
+}
+
+TEST_F(ConveyorTest, Context) {
+  size_t index          = 0;
+  ITransport* transport = nullptr;
+
+  pipeline_.addLast<MockStage<>>();
+  pipeline_.addLast<MockStage<>>(MockStage<>{
+      .on_added =
+          [&](auto& ctx) {
+            index     = ctx.index();
+            transport = &ctx.transport();
+          },
+  });
+  pipeline_.addLast<MockStage<>>();
+
+  EXPECT_EQ(index, 1U);
+  EXPECT_EQ(transport, &transport_);
+}
+
+TEST_F(ConveyorTest, Transform) {
+  size_t bytes_received   = 0;
+  size_t suspend_received = 0;
+
+  struct Transform {
+    size_t* count;
+
+    void onInbound(StageContext& ctx, InboundBytes& /*evt*/) {
+      ++(*count);
+      InboundSuspend suspend{};
+      ctx.fireInbound(suspend);
+    }
+  };
+
+  pipeline_.addLast<Transform>(&bytes_received);
+  pipeline_.addLast<MockStage<>>(MockStage<>{
+      .on_inbound = [&](auto&) { ++suspend_received; },
+  });
+
+  InboundBytes bytes{{}};
+  pipeline_.fireInbound(bytes);
+
+  EXPECT_EQ(bytes_received, 1U);
+  EXPECT_EQ(suspend_received, 1U);
+}
+
+TEST_F(ConveyorTest, SingleStage) {
+  size_t count = 0;
+
+  pipeline_.addLast<MockStage<>>(MockStage<>{
+      .on_inbound = [&](auto&) { ++count; },
+  });
+
+  InboundTransportActive evt{};
+  pipeline_.fireInbound(evt);
+
+  EXPECT_EQ(count, 1U);
+}
+
+TEST_F(ConveyorTest, InboundToOutbound) {
+  static constexpr int kCloseReason = 42;
+
+  size_t outbound_count = 0;
+  int close_reason      = 0;
+
+  struct Trigger {
+    void onInbound(StageContext& ctx, InboundTransportActive& /*evt*/) {
+      OutboundClose close{kCloseReason};
+      ctx.fireOutbound(close);
+    }
+  };
+
+  struct Capture {
+    size_t* count;
+    int* reason;
+
+    void onOutbound(StageContext& ctx, OutboundClose& evt) {
+      ++(*count);
+      *reason = evt.reason;
+      ctx.fireOutbound(evt);
+    }
+  };
+
+  pipeline_.addLast<Capture>(&outbound_count, &close_reason);
+  pipeline_.addLast<Trigger>();
+
+  InboundTransportActive evt{};
+  pipeline_.fireInbound(evt);
+
+  EXPECT_EQ(outbound_count, 1U);
+  EXPECT_EQ(close_reason, kCloseReason);
 }

@@ -1,5 +1,11 @@
 #pragma once
 
+// Bidirectional event pipeline with type-safe handler dispatch
+//
+// Conveyor implements ordered event pipeline.
+// Events flow forward (inbound) and backward (outbound) through stages.
+//
+
 #include <concepts>
 #include <cstddef>
 #include <memory>
@@ -31,6 +37,7 @@ concept HasOnOutbound =
 
 }  // namespace traits
 
+// Type-erased internal stage interface
 struct Stage {
   virtual ~Stage() = default;
 
@@ -42,6 +49,7 @@ struct Stage {
   virtual void onOutboundEvent(StageContext&, Event&) noexcept = 0;
 };
 
+// Stage execution context providing pipeline interaction and metadata
 class StageContext {
   Conveyor* p_;
   size_t i_;
@@ -60,6 +68,7 @@ public:
   void fireOutbound(E& evt) noexcept;
 };
 
+// Backbone of event pipeline
 class Conveyor {
   ITransport* transport_;
   std::vector<std::unique_ptr<Stage>> stages_;
@@ -147,6 +156,8 @@ inline void StageContext::fireOutbound<Event>(Event& evt) noexcept {
   }
 }
 
+// Internal adapter for type-erased stage.
+// Stages only implement handlers for events they care about; others will be forwarded
 template <class T>
 class StageAdapter final : public Stage {
 public:
