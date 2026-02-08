@@ -63,10 +63,14 @@ public:
   // Returns bytes committed (<= n).
   size_t commit(size_t n);
 
+  bool readUI32(uint32_t& out) noexcept;
+
+  bool writeUI32(uint32_t val) noexcept;
+
 private:
   size_t r_ = 0;
   size_t w_ = 0;
-  std::vector<std::uint8_t> data_;
+  std::vector<uint8_t> data_;
 };
 
 inline size_t ByteBuf::readableBytes() const noexcept {
@@ -153,6 +157,31 @@ inline size_t ByteBuf::commit(size_t n) {
   const size_t m = std::min(n, writableBytes());
   w_ += m;
   return m;
+}
+
+inline bool ByteBuf::readUI32(uint32_t& out) noexcept {
+  if (readableBytes() < 4) {
+    return false;
+  }
+
+  uint8_t buf[4];
+  peek(buf, 4);
+  advance(4);
+
+  out = buf[0] | (static_cast<uint32_t>(buf[1]) << 8) |
+        (static_cast<uint32_t>(buf[2]) << 16) |
+        (static_cast<uint32_t>(buf[3]) << 24);
+  return true;
+}
+
+inline bool ByteBuf::writeUI32(uint32_t val) noexcept {
+  uint8_t buf[4] = {
+      static_cast<uint8_t>(val),
+      static_cast<uint8_t>(val >> 8),
+      static_cast<uint8_t>(val >> 16),
+      static_cast<uint8_t>(val >> 24),
+  };
+  return write(buf, 4);
 }
 
 template <>

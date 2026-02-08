@@ -18,6 +18,8 @@ add_task_library(
   abstract_transport.cpp
   abstract_transport.hpp
   byte_buffer.hpp
+  chunker.cpp
+  chunker.hpp
   event.hpp
   conveyor.hpp
   tcp/tcp_listener.cpp
@@ -61,6 +63,21 @@ add_task_test(
 
 target_task_link_libraries(
   test_conveyor
+  PRIVATE
+  gtest
+  transport
+  event_watcher
+  bits
+  ttl
+)
+
+add_task_test(
+  test_chunker
+  tests/test_chunker.cpp
+)
+
+target_task_link_libraries(
+  test_chunker
   PRIVATE
   gtest
   transport

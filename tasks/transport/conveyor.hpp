@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "event.hpp"
+#include "transport.hpp"
 
 class Conveyor;
 class ITransport;
@@ -66,6 +67,8 @@ public:
 
   template <typename E>
   void fireOutbound(E& evt) noexcept;
+
+  void failure(int what) noexcept;
 };
 
 // Backbone of event pipeline
@@ -154,6 +157,11 @@ inline void StageContext::fireOutbound<Event>(Event& evt) noexcept {
   if (i_ > 0) {
     p_->fireOutboundFrom(i_ - 1, evt);
   }
+}
+
+inline void StageContext::failure(int what) noexcept {
+  auto* transport = p_->transport();
+  transport->shutdown(what);
 }
 
 // Internal adapter for type-erased stage.
