@@ -82,8 +82,8 @@ void handleCallback(WatchCallback& task) noexcept {
   }
 }
 
-constexpr int kMaxEpollRetries = 1 << 2; // (4)
-constexpr size_t kMaxEvents    = 1 << 6; // (64)
+constexpr int kMaxEpollRetries = 1 << 2;  // (4)
+constexpr size_t kMaxEvents    = 1 << 6;  // (64)
 
 }  // namespace
 
@@ -108,11 +108,14 @@ EventWatcher::EventWatcher(EpollWaitFunc epoll_impl)
     : epoll_fd_(bits::makeEpoll()), epoll_impl_{std::move(epoll_impl)} {
   handleWatch(event_.eventfd_, RDONLY, [this]() {
     TTL_LOG(Trace) << "wakeup(" << event_.eventfd_ << ")";
+    // It is important to clear eventfd prior to accessing queue.
+    // So that eventfd is guaranteed to be active event in case of race
+    // between loop and submitter thread.
+    event_.clear();
     std::optional<WatchCallback> task;
     while ((task = task_q_.tryPop()) && task.has_value()) {
       handleCallback(*task);
     }
-    event_.clear();
   });
 }
 
@@ -138,19 +141,21 @@ void EventWatcher::handleWatch(int fd, WatchFlag flag, WatchCallback callback) {
 
   int fd_op = EPOLL_CTL_MOD;
   if (entry.bitmask_ == 0) {
-    fd_op = EPOLL_CTL_ADD; 
+    fd_op = EPOLL_CTL_ADD;
   }
 
   entry.bitmask_ |= flag;
 
   switch (flag) {
     case RDONLY:
-      if (std::exchange(/* reader */ entry.cb_[0], std::move(callback)) == std::nullopt) {
+      if (std::exchange(/* reader */ entry.cb_[0], std::move(callback)) ==
+          std::nullopt) {
         handleFdWatchModeChange(entry, fd, fd_op);
       }
       break;
     case WRONLY:
-      if (std::exchange(/* writer */ entry.cb_[1], std::move(callback)) == std::nullopt) {
+      if (std::exchange(/* writer */ entry.cb_[1], std::move(callback)) ==
+          std::nullopt) {
         handleFdWatchModeChange(entry, fd, fd_op);
       }
       break;
@@ -183,12 +188,14 @@ void EventWatcher::handleUnwatch(int fd, WatchFlag flag) {
 
   switch (flag) {
     case RDONLY:
-      if (std::exchange(/* reader */ entry.cb_[0], std::nullopt) != std::nullopt) {
+      if (std::exchange(/* reader */ entry.cb_[0], std::nullopt) !=
+          std::nullopt) {
         handleFdWatchModeChange(entry, fd, fd_op);
       }
       break;
     case WRONLY:
-      if (std::exchange(/* writer */ entry.cb_[1], std::nullopt) != std::nullopt) {
+      if (std::exchange(/* writer */ entry.cb_[1], std::nullopt) !=
+          std::nullopt) {
         handleFdWatchModeChange(entry, fd, fd_op);
       }
       break;
@@ -227,7 +234,7 @@ void EventWatcher::loop(int timeout_ms) {
   static thread_local std::array<epoll_event, kMaxEvents> events;
 
   // Retry in case of interrupts.
-  // Park here until (any of) FD is ready. 
+  // Park here until (any of) FD is ready.
   int n_ready = -1;
   for (int retry = 0; retry < kMaxEpollRetries; ++retry) {
     n_ready = epoll_impl_(epoll_fd_, events.data(),
@@ -254,7 +261,6 @@ void EventWatcher::loop(int timeout_ms) {
     const int fd      = event.data.fd;
 
     auto [entry, _] = fd_map_.try_emplace(fd, {});
-
 
     // FD is broken, let caller handle
     if ((event.events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {

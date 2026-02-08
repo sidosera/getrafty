@@ -40,12 +40,27 @@ target_task_link_libraries(
 )
 
 add_task_test(
-  tcp_test
-  tcp/tcp_test.cpp
+  test_tcp_transport
+  tests/test_tcp_transport.cpp
 )
 
 target_task_link_libraries(
-  tcp_test
+  test_tcp_transport
+  PRIVATE
+  gtest
+  transport
+  event_watcher
+  bits
+  ttl
+)
+
+add_task_test(
+  test_conveyor
+  tests/test_conveyor.cpp
+)
+
+target_task_link_libraries(
+  test_conveyor
   PRIVATE
   gtest
   transport

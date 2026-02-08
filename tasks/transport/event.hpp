@@ -1,72 +1,59 @@
 #pragma once
+
+#include <variant>
 #include "byte_buffer.hpp"
 
-using type_id_t = const void*;
-
-template <class T>
-constexpr type_id_t type_id() noexcept {
-  static const int tag{};
-  return &tag;
-}
-
-struct Event {
-  virtual ~Event()                                      = default;
-  [[nodiscard]] virtual type_id_t type() const noexcept = 0;
-};
-
-// CRTP: https://en.wikipedia.org/wiki/Curiously_recurring_template_pattern
-template <class Derived>
-struct EventBase : Event {
-private:
-  EventBase() = default;
-
-public:
-  static constexpr type_id_t static_type() noexcept {
-    return type_id<Derived>();
-  }
-
-  [[nodiscard]] type_id_t type() const noexcept override {
-    return static_type();
-  }
-
-  friend Derived;
-};
+// Plain event structs (no inheritance!)
 
 // Transport lifecycle
-struct InboundTransportActive : EventBase<InboundTransportActive> {};
+struct InboundTransportActive {};
 
-struct InboundTransportInactive : EventBase<InboundTransportInactive> {};
+struct InboundTransportInactive {};
 
-struct InboundTransportError : EventBase<InboundTransportError> {
+struct InboundTransportError {
   int err;
 
   explicit InboundTransportError(int e) : err(e) {}
 };
 
 // Data flow
-struct InboundBytes : EventBase<InboundBytes> {
+struct InboundBytes {
   ByteBuf buf;
 
   explicit InboundBytes(ByteBuf&& b) : buf(std::move(b)) {}
 };
 
-struct OutboundBytes : EventBase<OutboundBytes> {
+struct OutboundBytes {
   ByteBuf buf;
 
   explicit OutboundBytes(ByteBuf&& b) : buf(std::move(b)) {}
 };
 
 // Control flow
-struct InboundSuspend : EventBase<InboundSuspend> {};
+struct InboundSuspend {};
 
-struct InboundResume : EventBase<InboundResume> {};
+struct InboundResume {};
 
-struct OutboundSuspend : EventBase<OutboundSuspend> {};
+struct OutboundSuspend {};
 
-struct OutboundResume : EventBase<OutboundResume> {};
+struct OutboundResume {};
 
-struct OutboundClose : EventBase<OutboundClose> {
+struct OutboundClose {
   int reason;
 
   explicit OutboundClose(int r = 0) : reason(r) {}
 };
+
+
+using Event = std::variant<
+    InboundTransportActive,
+    InboundTransportInactive,
+    InboundTransportError,
+    InboundBytes,
+    InboundSuspend,
+    InboundResume,
+    OutboundBytes,
+    OutboundClose,
+    OutboundSuspend,
+    OutboundResume
+>;

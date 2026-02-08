@@ -33,19 +33,17 @@ int TcpTransport::writeSome(ByteBuf& src, size_t max_bytes) {
   }
 
   size_t to_send = std::min(tail, max_bytes);
-  auto iov = src.headroom<std::vector<iovec>>();
+  auto iov       = src.headroom<std::vector<iovec>>();
   if (iov.empty()) {
     return 0;
   }
   size_t remaining = to_send;
-  size_t count = 0;
+  size_t count     = 0;
   for (auto& entry : iov) {
     if (remaining == 0) {
       break;
     }
-    if (entry.iov_len > remaining) {
-      entry.iov_len = remaining;
-    }
+    entry.iov_len = std::min(entry.iov_len, remaining);
     remaining -= entry.iov_len;
     ++count;
   }

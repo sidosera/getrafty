@@ -5,9 +5,9 @@
 #include "event_watcher/event_watcher.hpp"
 #include "transport.hpp"
 
-
 class AbstractEventLoopTransport : public ITransport {
   using EventWatcher = getrafty::io::EventWatcher;
+
 public:
   explicit AbstractEventLoopTransport(int fd, EventWatcher* ew);
   ~AbstractEventLoopTransport() override;

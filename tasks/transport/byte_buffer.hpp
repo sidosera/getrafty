@@ -8,7 +8,7 @@
 
 // ByteBuf is a sequential stream buffer for I/O.
 // TODO: Zero-copy implementation with fixed-size segments (see README.md).
-// TODO: ZigZag encoding for endianess independent storage
+// TODO: ZigZag encoding for endianess independent storage.
 // TODO: Helper methods to read/write/peek of primitive types such as uint32, string, etc.
 class ByteBuf {
 public:

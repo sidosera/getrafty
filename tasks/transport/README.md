@@ -880,6 +880,43 @@ ConveyorInit initWithIdle = [&ew](Conveyor& p) {
 ```
 
 
+## Server
+
+
+                 W1: [@@] 
+-> Q: [@@@@] ->  W2: [@]
+
+
+IO vs Worker
+
+IO
+
+- Read + Write + Frame
+
+Worker
+
+- Parsing
+- Handling
+- 
+
+Worker Queue
+
+Timeout 
+
+Queue timeout
+
+Deadline
+
+
+Max connections
+
+Load shedding
+
+
+
+
+
+
 TODO:
 
 [x] Interfaces
